@@ -22,17 +22,21 @@ class FeaturesEncoderDecoder:
     categorical (resp. muti-valued) feature taking value in the set (resp. in the power set of)
     feature_labels
 
-    contours_lines_table_name : name of the tables that will store contour lines
     """
 
     def __init__(self, categorical_features=['product_type','nb_components'],
                        multi_valued_features=['composition','raw_material_country','weaving_country','dyeing_country','manufacturing_country'],
-                       boolean_features=['plane_in_transports']):
+                       boolean_features=['plane_in_transports'],
+                       numerical_features=['resource_use_fossils']):
 
 
         self.categorical_features=categorical_features
         self.multi_valued_features=multi_valued_features
         self.boolean_features=boolean_features
+        self.numerical_features=numerical_features
+
+        self.n_binary_features=None
+        self.n_numerical_features=len(self.numerical_features)
         self.labels={}
 
 
@@ -56,11 +60,14 @@ class FeaturesEncoderDecoder:
         that store our processed samples
         """
 
+
+        n_binary_features=0
         for feature in self.categorical_features:
             if compute_labels:
                 feature_labels=df[feature].unique()
                 feature_labels=sorted(feature_labels)
                 self.labels[feature]=np.array(feature_labels)
+                n_binary_features+=len(feature_labels)
             else:
                 feature_labels=self.labels[feature]
             for label in feature_labels:
@@ -74,19 +81,60 @@ class FeaturesEncoderDecoder:
                 feature_labels=list(set([elem for l in df[feature] for elem in l]))
                 feature_labels=sorted(feature_labels)
                 self.labels[feature]=np.array(feature_labels)
+                n_binary_features+=len(feature_labels)
+
             else:
                 feature_labels=self.feature_labels
             for label in feature_labels:
                 col="%s_%s"%(feature,label)
                 df[col]=df[feature].apply(lambda l:label in l)
 
+        if compute_labels:
+            n_binary_features+=len(self.boolean_features)
+            self.n_binary_features=n_binary_features
 
         X_cat=np.array(df[["%s_%s"%(feature,label) for feature,feature_labels in self.labels.items() for label in feature_labels]],dtype='float16')
         X_bool=np.array(df[self.boolean_features])
-        encoded_samples=np.concatenate([X_cat,X_bool],axis=1)
+        X_num=np.array(df[self.numerical_features])
+        encoded_samples=np.concatenate([X_cat,X_bool,X_num],axis=1)
         return encoded_samples
 
 
+    def compute_features(self,nx_tree,root=0):
+        """This functions assigns to each node of the networkx
+        tree a binary vector whose coordinates are the binary features 
+        assignments if the feature was used in the decision path orelse -1.
+
+
+        Parameters
+        ----------
+        nx_tree : an networkx tree graph
+
+        """
+        paths=nx.shortest_path(nx_tree,root)
+        for node,path in paths.items():
+            features=[None]*(self.n_binary_features+self.n_numerical_features)
+            for k in range(len(path)-1):
+                splitting_feature_index=nx_tree.nodes()[path[k]]['splitting_feature']
+                if splitting_feature_index<self.n_binary_features:
+                    if nx_tree.get_edge_data(path[k],path[k+1])['type']=='left':
+                        features[splitting_feature_index]=0
+                    else:
+                        features[splitting_feature_index]=1
+                else:
+                    threshold=nx_tree.nodes()[path[k]]['threshold']
+                    if nx_tree.get_edge_data(path[k],path[k+1])['type']=='left':
+                        if features[splitting_feature_index] is None:
+                            features[splitting_feature_index] = (-np.inf,threshold)
+                        else:
+                            features[splitting_feature_index]=(features[splitting_feature_index][0],threshold)
+                    else:
+                        if features[splitting_feature_index] is None:
+                            features[splitting_feature_index] = (threshold,np.inf)
+                        else:
+                            features[splitting_feature_index]=(threshold,features[splitting_feature_index][1])
+
+            nx_tree.nodes()[node]['features']=features
 
 
     def decode_key_configuration(self,leaf_configuration):
@@ -113,7 +161,7 @@ class FeaturesEncoderDecoder:
         N=0
         for feature in self.categorical_features:
             feature_labels=self.labels[feature]
-            leaf_configuration_feature=leaf_configuration[N:N+len(feature_labels)]
+            leaf_configuration_feature=np.array(leaf_configuration[N:N+len(feature_labels)])
             if np.all(leaf_configuration_feature!=1):
                 decoded_configuration[feature]={'forbidden_labels':feature_labels[np.where(leaf_configuration_feature==0)[0]]}
             else:
@@ -123,14 +171,19 @@ class FeaturesEncoderDecoder:
 
         for feature in self.multi_valued_features:
             feature_labels=self.labels[feature]
-            leaf_configuration_feature=leaf_configuration[N:N+len(feature_labels)]
+            leaf_configuration_feature=np.array(leaf_configuration[N:N+len(feature_labels)])
             decoded_configuration[feature]={'forbidden_labels':feature_labels[np.where(leaf_configuration_feature==0)[0]],
                                             'mandatory_labels':feature_labels[np.where(leaf_configuration_feature==1)[0]]}
             N+=len(feature_labels)            
 
         for feature in self.boolean_features:
             leaf_configuration_bool=leaf_configuration[N]
-            decoded_configuration[feature]=bool(leaf_configuration_bool) if leaf_configuration_bool!=-1. else None
+            decoded_configuration[feature]=bool(leaf_configuration_bool) if leaf_configuration_bool is not None else None
+            N+=1          
+
+        for feature in self.numerical_features:
+            leaf_configuration_num=leaf_configuration[N]
+            decoded_configuration[feature]={'min':leaf_configuration_num[0],'max':leaf_configuration_num[1]} if leaf_configuration is not None else None
             N+=1          
         return decoded_configuration
 
@@ -153,10 +206,11 @@ def convert_tree(tree):
     nx_tree : the networkx converted graph
     """
     splitting_features=tree.feature
+    thresholds=tree.threshold
     values=tree.value[:,0,0]
     nx_tree=nx.DiGraph()
-    for k,(splitting_feature,value) in enumerate(zip(splitting_features,values)):
-        nx_tree.add_node(k,splitting_feature=splitting_feature,value=value)
+    for k,(splitting_feature,threshold,value) in enumerate(zip(splitting_features,thresholds,values)):
+        nx_tree.add_node(k,splitting_feature=splitting_feature,threshold=threshold,value=value)
     for k,children_left in enumerate(tree.children_left):
         if children_left!=-1:
             nx_tree.add_edge(k,children_left,type='left')
@@ -166,27 +220,7 @@ def convert_tree(tree):
     return nx_tree
 
 
-def compute_features(nx_tree,n_binary_features,root=0):
-    """This functions assigns to each node of the networkx
-    tree a binary vector whose coordinates are the binary features 
-    assignments if the feature was used in the decision path orelse -1.
 
-
-    Parameters
-    ----------
-    nx_tree : an networkx tree graph
-
-    """
-    paths=nx.shortest_path(nx_tree,root)
-    for node,path in paths.items():
-        features=-1*np.ones(n_binary_features)
-        for k in range(len(path)-1):
-            splitting_feature_index=nx_tree.nodes()[path[k]]['splitting_feature']
-            if nx_tree.get_edge_data(path[k],path[k+1])['type']=='left':
-                features[splitting_feature_index]=0
-            else:
-                features[splitting_feature_index]=1
-        nx_tree.nodes()[node]['binary_features']=features
 
 
 
@@ -207,6 +241,6 @@ def extract_leaf_configuration(nx_tree):
     leaf_values : the corresponding target variable values
     """
     out_degree=nx_tree.out_degree
-    leaf_configurations=np.array([data['binary_features'] for node,data in nx_tree.nodes(data=True) if out_degree[node]==0])
-    leaf_values=np.array([data['value'] for node,data in nx_tree.nodes(data=True) if out_degree[node]==0])
+    leaf_configurations=[data['features'] for node,data in nx_tree.nodes(data=True) if out_degree[node]==0]
+    leaf_values=[data['value'] for node,data in nx_tree.nodes(data=True) if out_degree[node]==0]
     return leaf_configurations,leaf_values

@@ -18,6 +18,14 @@ class FeaturesEncoderDecoder:
 
     boolean_features : names of the boolean_features appearing in the dataframe
 
+    numerical_features : names of the numerical_features appearing in the dataframe
+
+    n_binary_features : number of processed binary features (to be computed)
+
+    n_numerical_features : number of numerical features 
+
+    numerical_features : names of the numerical_features appearing in the dataframe
+
     labels : a dictionary whose entries will be like (feature,feature_labels) for a 
     categorical (resp. muti-valued) feature taking value in the set (resp. in the power set of)
     feature_labels
@@ -103,8 +111,8 @@ class FeaturesEncoderDecoder:
     def compute_features(self,nx_tree,root=0):
         """This functions assigns to each node of the networkx
         tree a binary vector whose coordinates are the binary features 
-        assignments if the feature was used in the decision path orelse -1.
-
+        assignments, min/max bounds of the numerical features for 
+        features appearing in the path else None
 
         Parameters
         ----------
@@ -144,9 +152,10 @@ class FeaturesEncoderDecoder:
 
         Parameters
         ----------
-        leaf_configuration : a vector with 0s and 1s indicating a 
-        coordinate was assigned this value when going down the tree
-        orelse -1
+        leaf_configuration : a list with 0s and 1s indicating a 
+        binary feature assignment, (min,max) bounds for a numerical
+        feature or None if the feature was not used in the decision
+        path.
 
 
         Returns
@@ -236,7 +245,7 @@ def extract_leaf_configuration(nx_tree):
     Returns
     -------
     leaf_configurations : leaf configurations encoded as 
-    a numpy array 
+    a lists 
 
     leaf_values : the corresponding target variable values
     """
